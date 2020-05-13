@@ -30,8 +30,13 @@
 #include "core/logger.hpp"
 #include "table/cleanup.hpp"
 #include <ndn-cxx/lp/tags.hpp>
-
 #include "face/null-face.hpp"
+//****************************************Added by DJAMA Adel**********************************************
+#include <ns3/simulator.h>
+#include <ns3/node-list.h>
+#include <ns3/node.h>
+//#include "scheduler.hpp"
+//***************************************************************************************************************
 
 namespace nfd {
 
@@ -80,24 +85,45 @@ Forwarder::Forwarder()
 }
 
 Forwarder::~Forwarder() = default;
-
 void
 Forwarder::onIncomingInterest(Face& inFace, const Interest& interest)
 {
+ auto  node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+ auto nodIDtag = interest.getTag<ns3::ndn::lp::NodeIDTag>();
+//if (/*interest.getName().getPrefix(1) == "/localhost" || */
+//		node->GetId() == 0 || node->GetId() == 1 || 
+//	node->GetId() == 7 || node->GetId() == 8 ||
+//		node->GetId() == 14 || node->GetId() == 15 ||
+//		node->GetId() == 21 || node->GetId() == 22 ||
+//		node->GetId() == 28 || nodIDtag == nullptr)
+//{		
+  //****************************************Added by DJAMA Adel**********************************************
   //std::cout<<" ************ Interest Nonce ****************"<< interest.getNonce()<<std::endl;
   //std::cout<<" ************ Link Type Face ****************"<< inFace.getLinkType() <<std::endl;
+  //auto node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+  //std::cout<<" ************ Node ID :****************"<< node->GetId() <<std::endl;
+  //shared_ptr<lp::HopCountTag> hopCountTag = netPkt.getTag<lp::HopCountTag>();
+  /*auto hopCountTag = interest.getTag<ns3::ndn::lp::HopCountTag>();
+  int hopCount = *hopCountTag;
+  std::cout<<" *******************Hop count: *************************"<<hopCount<<std::endl;*/
+ int nodID=-1;
+  if (nodIDtag != nullptr){
+	 nodID=*nodIDtag;   
+  }
+  //std::cout<<" ******************Node ID :************************************ "<<node->GetId()<<std::endl;
+  //std::cout<<ns3::Simulator::Now().GetSeconds()<<": ******* Incoming Interest ****** At node: "<<node->GetId()<<"  From node: "<<nodID<<std::endl;
+  //***************************************************************************************************************
   // receive Interest
-  NFD_LOG_DEBUG("onIncomingInterest face=" << inFace.getId() <<
-                " interest=" << interest.getName());
+   NFD_LOG_DEBUG("onIncomingInterest face=" << inFace.getId() <<
+           " interest=" << interest.getName() << "From node: "<<nodID);  
   interest.setTag(make_shared<lp::IncomingFaceIdTag>(inFace.getId()));
   ++m_counters.nInInterests;
-
-  // /localhost scope control
+  // localhost scope control
   bool isViolatingLocalhost = inFace.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL &&
                               scope_prefix::LOCALHOST.isPrefixOf(interest.getName());
   if (isViolatingLocalhost) {
-    NFD_LOG_DEBUG("onIncomingInterest face=" << inFace.getId() <<
-                  " interest=" << interest.getName() << " violates /localhost");
+   NFD_LOG_DEBUG("onIncomingInterest face=" << inFace.getId() <<
+                 " interest=" << interest.getName() << " violates /localhost");
     // (drop)
     return;
   }
@@ -119,8 +145,9 @@ Forwarder::onIncomingInterest(Face& inFace, const Interest& interest)
   }
 
   // PIT insert
-  shared_ptr<pit::Entry> pitEntry = m_pit.insert(interest).first;
-
+   shared_ptr<pit::Entry> pitEntry;
+   pitEntry = m_pit.insert(interest).first;
+   
   // detect duplicate Nonce in PIT entry
   int dnw = fw::findDuplicateNonce(*pitEntry, interest.getNonce(), inFace);
   bool hasDuplicateNonceInPit = dnw != fw::DUPLICATE_NONCE_NONE;
@@ -147,13 +174,14 @@ Forwarder::onIncomingInterest(Face& inFace, const Interest& interest)
         this->onContentStoreHit(inFace, pitEntry, interest, *match);
       }
       else {
-        this->onContentStoreMiss(inFace, pitEntry, interest);
+				this->onContentStoreMiss(inFace, pitEntry, interest);
       }
     }
   }
   else {
-    this->onContentStoreMiss(inFace, pitEntry, interest);
-  }
+	    this->onContentStoreMiss(inFace, pitEntry, interest);
+   }
+//}
 }
 
 void
@@ -164,7 +192,17 @@ Forwarder::onInterestLoop(Face& inFace, const Interest& interest)
     NFD_LOG_DEBUG("onInterestLoop face=" << inFace.getId() <<
                   " interest=" << interest.getName() <<
                   " drop");
-    return;
+    //*******************************************************************************
+	shared_ptr<pit::Entry> pitEntry = m_pit.find(interest);
+	//NFD_LOG_DEBUG("diffTimerFired="<< pitEntry->diffTimerFired);
+	if (!pitEntry->diffTimerFired)// Interest is Received (overheared) within the DifferTimer period
+	{
+		NFD_LOG_DEBUG("Cancel Sending Interest="<< interest.getName());
+		scheduler::cancel(pitEntry->differTimer);//Cancel DiffTimer
+		m_pit.erase(pitEntry.get());//Erase pitEntry
+	}
+	//*******************************************************************************
+	return;
   }
 
   NFD_LOG_DEBUG("onInterestLoop face=" << inFace.getId() <<
@@ -187,18 +225,21 @@ compare_InRecord_expiry(const pit::InRecord& a, const pit::InRecord& b)
 void
 Forwarder::onContentStoreMiss(const Face& inFace, const shared_ptr<pit::Entry>& pitEntry,
                               const Interest& interest)
-{
+ {
   NFD_LOG_DEBUG("onContentStoreMiss interest=" << interest.getName());
+  auto  node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+  auto nodIDtag = interest.getTag<ns3::ndn::lp::NodeIDTag>();
   ++m_counters.nCsMisses;
-
-  // insert in-record
+// insert in-record
   pitEntry->insertOrUpdateInRecord(const_cast<Face&>(inFace), interest);
+//****************************************************************************************
 
+//****************************************************************************************
   // set PIT expiry timer to the time that the last PIT in-record expires
   auto lastExpiring = std::max_element(pitEntry->in_begin(), pitEntry->in_end(), &compare_InRecord_expiry);
   auto lastExpiryFromNow = lastExpiring->getExpiry() - time::steady_clock::now();
   this->setExpiryTimer(pitEntry, time::duration_cast<time::milliseconds>(lastExpiryFromNow));
-
+  
   // has NextHopFaceId?
   shared_ptr<lp::NextHopFaceIdTag> nextHopTag = interest.getTag<lp::NextHopFaceIdTag>();
   if (nextHopTag != nullptr) {
@@ -210,9 +251,10 @@ Forwarder::onContentStoreMiss(const Face& inFace, const shared_ptr<pit::Entry>& 
       // scope control is unnecessary, because privileged app explicitly wants to forward
 	  this->onOutgoingInterest(pitEntry, *nextHopFace, interest);
     }
-    return;
+	return;
   }
   // dispatch to strategy: after incoming Interest
+  
   this->dispatchToStrategy(*pitEntry,
     [&] (fw::Strategy& strategy) { strategy.afterReceiveInterest(inFace, interest, pitEntry); });
 }
@@ -242,19 +284,107 @@ Forwarder::onContentStoreHit(const Face& inFace, const shared_ptr<pit::Entry>& p
     [&] (fw::Strategy& strategy) { strategy.afterContentStoreHit(pitEntry, inFace, data); });
 }
 
+
+void 
+Forwarder::DifferTimer(const shared_ptr<pit::Entry>& pitEntry, const shared_ptr<Face>& outFace, 
+									const shared_ptr<Interest>& interest)
+{
+  NFD_LOG_DEBUG("onOutgoingInterest face=" << outFace->getId() <<
+                " interest=" << pitEntry->getName());
+ // auto nodeIDtag = interest->getTag<ns3::ndn::lp::NodeIDTag>();
+ // int nodeID=*nodeIDtag;   
+ // std::cout<<" ******************DifferTimer----NodeIDTag:************************************ "<<nodeID<<std::endl; 
+  pitEntry->diffTimerFired = true;
+  outFace->sendInterest(*interest);
+  ++m_counters.nOutInterests;
+}
+
 void
 Forwarder::onOutgoingInterest(const shared_ptr<pit::Entry>& pitEntry, Face& outFace, const Interest& interest)
 {
-  NFD_LOG_DEBUG("onOutgoingInterest face=" << outFace.getId() <<
-                " interest=" << pitEntry->getName());
+  //NFD_LOG_DEBUG("onOutgoingInterest face=" << outFace.getId() <<
+  //              " interest=" << pitEntry->getName());
 
   // insert out-record
+  shared_ptr<Interest> interest2 = make_shared<Interest>(interest);
   pitEntry->insertOrUpdateOutRecord(outFace, interest);
-
+  //*******************************************************************************
+  /*auto nodIDtag = interest2->getTag<ns3::ndn::lp::NodeIDTag>();
+  if (nodIDtag != nullptr){
+  auto aa=pitEntry->getInterest().getTag<ns3::ndn::lp::NodeIDTag>();
+  int a=*aa;
+  //int e=*nodIDtag;
+  std::cout<<" **************  pitEntry ID Tag*******************= " <<a<<std::endl;
+  //std::cout<<" **************  interest2*******************= " <<e<<std::endl;
+  }*/
   // send Interest
-  outFace.sendInterest(interest);
-  ++m_counters.nOutInterests;
+  //***************************************************************
+  auto node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+  //std::cout<<" ******************Node ID :************************************ "<<node->GetId()<<std::endl;
+  interest2->setTag(make_shared<lp::NodeIDTag>(node->GetId()));
+  //*****************************************************************
+  shared_ptr<Interest> interest3=interest2;
+  /*{
+  //shared_ptr<Face> F = make_shared<Face>(outFace);  
+     if (outFace.getId() == 1 and ns3::Simulator::Now().GetSeconds()==0){
+	     //ns3::Simulator::Schedule(ns3::Seconds(0.1), [&]{outFace.sendInterest(*interest3);++m_counters.nOutInterests;});	 
+		outFace.sendInterest(*interest3);
+		++m_counters.nOutInterests;
+		 //nfd::scheduler::schedule(time::milliseconds(100), [&]{outFace.sendInterest(*interest3);++m_counters.nOutInterests;});	 
+	 }else{
+		nfd::scheduler::schedule(time::milliseconds(100), [&]{outFace.sendInterest(*interest3);++m_counters.nOutInterests;});	 
+		//outFace.sendInterest(*interest3);
+		//++m_counters.nOutInterests;		
+	 }
+	//nfd::scheduler::schedule(time::milliseconds(100), [&]{outFace.sendInterest(*interest3);++m_counters.nOutInterests;});
+   //&Face::sendInterest,&outFace,(*copy)
+   //ns3::Simulator::Schedule(ns3::Seconds(0.5), &Forwarder::timer, &outFace, interest3);
+   // ************************************************
+   //       pitEntry->expiryTimer = scheduler::schedule(duration, bind(&Forwarder::onInterestFinalize, this, pitEntry));
+   // PIT delete
+   //       scheduler::cancel(pitEntry->expiryTimer); 
+  //       m_pit.erase(pitEntry.get());
+  //}*/
+   // **************************************************
+   auto FaceCopy =outFace.shared_from_this();
+   auto InterestCopy =interest3->shared_from_this();
+ /*  
+   auto nodIDtag = interest2->getTag<ns3::ndn::lp::NodeIDTag>();
+   if (nodIDtag != nullptr)
+   {
+	  auto zz=pitEntry->getInterest().getTag<ns3::ndn::lp::NodeIDTag>();
+	  int ee=*nodIDtag;
+	  if (zz != nullptr) 
+	     {
+			int z=*zz;
+			std::cout<<" **************  pitEntry ID Tag*******************= " <<z<<std::endl;
+		 }
+	  std::cout<<ns3::Simulator::Now().GetSeconds()<<" **************interest2*******************= " <<ee<<std::endl;
+   }
+*/   
+   // Enable Diff timer in case of outgoing face is external (ad hoc face = 256)
+   auto pitIdNodTag=pitEntry->getInterest().getTag<ns3::ndn::lp::NodeIDTag>();
+   // Define Diff Time according to the outFace and the Interest packet type 
+   time::milliseconds DiffTime ;
+   if (outFace.getId() == 256 && pitIdNodTag != nullptr ) 
+			DiffTime = time::milliseconds(rand()%20);
+   else DiffTime = time::milliseconds(0);
+   /*if (outFace.getId() == 256 && pitIdNodTag != nullptr)
+   //{
+			//scheduler::EventId diffTimer;
+			//scheduler::cancel(diffTimer);  // To cancel sending interest
+			//diffTimer = scheduler::schedule(DiffTime, bind(&Forwarder::DifferTimer, this,  pitEntry, FaceCopy, InterestCopy));
+			//scheduler::cancel(pitEntry->differTimer);*/
+	pitEntry->diffTimerFired = false;
+	pitEntry->differTimer = scheduler::schedule(DiffTime, bind(&Forwarder::DifferTimer, this,  pitEntry, FaceCopy, InterestCopy));
+   /*}else{ 
+	//		NFD_LOG_DEBUG("onOutgoingInterest face=" << outFace.getId() <<" interest=" << pitEntry->getName());
+	//		outFace.sendInterest(*interest3);
+     //       ++m_counters.nOutInterests;
+      //    }*/
 }
+
+
 
 void
 Forwarder::onInterestFinalize(const shared_ptr<pit::Entry>& pitEntry)
@@ -279,9 +409,43 @@ Forwarder::onIncomingData(Face& inFace, const Data& data)
 {
   //std::cout<<" ************ Link Type Face ****************"<< inFace.getLinkType() <<std::endl;
   // receive Data
-  NFD_LOG_DEBUG("onIncomingData face=" << inFace.getId() << " data=" << data.getName());
+  //std::cout<<"onIncomingData face=" << inFace.getId() << " data=" << data.getName()<<std::endl;
+  //***************************************************************************************************************
+ /*auto nodIDtag = data.getTag<ns3::ndn::lp::NodeIDTag>();
+  int nodID=-1;
+  if (nodIDtag != nullptr){
+	 nodID=*nodIDtag;   
+  }
+  if(nodID != -1)
+  {
+    auto node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+    std::cout<<" ******************Node ID :************************************ "<<node->GetId()<<std::endl;
+    std::cout<<ns3::Simulator::Now().GetSeconds()<<": ******* Incoming Data ****** At node: "<<node->GetId()<<"  From node: "<<nodID<<std::endl;
+  }*/
+  //***************************************************************************************************************
+  auto hopCountTag = data.getTag<ns3::ndn::lp::HopCountTag>();
+  int hp=-1;
+  if (hopCountTag != nullptr){
+	 hp=*hopCountTag;   
+  }
+  NFD_LOG_DEBUG("onIncomingData face=" << inFace.getId() << " data=" << data.getName()<<" HopCount="<<hp);
   data.setTag(make_shared<lp::IncomingFaceIdTag>(inFace.getId()));
   ++m_counters.nInData;
+  
+  //
+  /*auto hopCountTag = data.getTag<ns3::ndn::lp::HopCountTag>();
+  int hp=-1;
+  if (hopCountTag != nullptr){
+	 hp=*hopCountTag;   
+  }
+  std::cout<<" ------------------------ Hop count--------------------------------- : "<<hp<<std::endl;*/
+  /*auto nodIDtag = data.getTag<ns3::ndn::lp::NodeIDTag>();
+  int nodID=-1;
+  if (nodIDtag != nullptr){
+	 nodID=*nodIDtag;   
+  }
+  std::cout<<" Node ID: "<<nodID<<std::endl;*/
+  //
 
   // /localhost scope control
   bool isViolatingLocalhost = inFace.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL &&
@@ -303,7 +467,9 @@ Forwarder::onIncomingData(Face& inFace, const Data& data)
 
   shared_ptr<Data> dataCopyWithoutTag = make_shared<Data>(data);
   dataCopyWithoutTag->removeTag<lp::HopCountTag>();
-
+  //***********************************
+  dataCopyWithoutTag->removeTag<lp::NodeIDTag>();
+  //***********************************
   // CS insert
   if (m_csFromNdnSim == nullptr)
     m_cs.insert(*dataCopyWithoutTag);
@@ -313,8 +479,20 @@ Forwarder::onIncomingData(Face& inFace, const Data& data)
   // when only one PIT entry is matched, trigger strategy: after receive Data
   if (pitMatches.size() == 1) {
     auto& pitEntry = pitMatches.front();
-    NFD_LOG_DEBUG("onIncomingData matching=" << pitEntry->getName());
-
+	//***********************************************************
+	int a=-1;
+	auto aa=pitEntry->getInterest().getTag<ns3::ndn::lp::NodeIDTag>();
+    if (aa != nullptr) 	a=*aa;
+	//***********************************************************
+   auto nodIDtag = data.getTag<ns3::ndn::lp::HopCountTag>();
+   if (nodIDtag != nullptr){
+	 auto  node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+		   if  (node->GetId() == 0)
+			{
+			    //NFD_LOG_DEBUG("onIncomingData matching=" << pitEntry->getName()<<" HopCount="<<hp);//<< "    pitEntry ID Tag=" <<a);
+			}
+	}  
+    //*************************************************************
     // set PIT expiry timer to now
     this->setExpiryTimer(pitEntry, 0_ms);
 
@@ -396,8 +574,8 @@ Forwarder::onDataUnsolicited(Face& inFace, const Data& data)
   }
 
   NFD_LOG_DEBUG("onDataUnsolicited face=" << inFace.getId() <<
-                " data=" << data.getName() <<
-                " decision=" << decision);
+               " data=" << data.getName() <<
+               " decision=" << decision);
 }
 
 void
@@ -407,9 +585,10 @@ Forwarder::onOutgoingData(const Data& data, Face& outFace)
     NFD_LOG_WARN("onOutgoingData face=invalid data=" << data.getName());
     return;
   }
+  //std::cout<<"onOutgoingData face=" << outFace.getId() << " data=" << data.getName()<<std::endl;
   NFD_LOG_DEBUG("onOutgoingData face=" << outFace.getId() << " data=" << data.getName());
 
-  // /localhost scope control
+  // localhost scope control
   bool isViolatingLocalhost = outFace.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL &&
                               scope_prefix::LOCALHOST.isPrefixOf(data.getName());
   if (isViolatingLocalhost) {
@@ -420,7 +599,10 @@ Forwarder::onOutgoingData(const Data& data, Face& outFace)
   }
 
   // TODO traffic manager
-
+  //***************************************************************
+  //auto node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+  //shared_ptr<Data> data2 = make_shared<Data>(data);
+  //data2->setTag(make_shared<lp::NodeIDTag>(node->GetId()));
   // send Data
   outFace.sendData(data);
   ++m_counters.nOutData;
