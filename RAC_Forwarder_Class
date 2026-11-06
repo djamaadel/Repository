@@ -1,0 +1,1127 @@
+//****************Our proposed Learning-based Adaptive Forwarding Strategy 
+//***************--Deferred Delay For Interest Forwarding based on Energy and DIstance to the producer
+//****************Smart Interest forwarding following a Learned Path to the producer for a certain period 
+/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
+/*
+ * Copyright (c) 2014-2018,  Regents of the University of California,
+ *                           Arizona Board of Regents,
+ *                           Colorado State University,
+ *                           University Pierre & Marie Curie, Sorbonne University,
+ *                           Washington University in St. Louis,
+ *                           Beijing Institute of Technology,
+ *                           The University of Memphis.
+ *
+ * This file is part of NFD (Named Data Networking Forwarding Daemon).
+ * See AUTHORS.md for complete list of NFD authors and contributors.
+ *
+ * NFD is free software: you can redistribute it and/or modify it under the terms
+ * of the GNU General Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later version.
+ *
+ * NFD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ * PURPOSE.  See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * NFD, e.g., in COPYING.md file.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "forwarder.hpp"
+#include "algorithm.hpp"
+#include "best-route-strategy2.hpp"
+#include "strategy.hpp"
+#include "core/logger.hpp"
+#include "table/cleanup.hpp"
+#include <ndn-cxx/lp/tags.hpp>
+#include "face/null-face.hpp"
+//****************************************Added by DJAMA Adel**********************************************
+#include <ns3/simulator.h>
+#include <ns3/node-list.h>
+#include <ns3/node.h>
+#include <ns3/rng-seed-manager.h>
+#include <ns3/random-variable-stream.h>
+#include <ns3/ptr.h>
+#include <ns3/double.h>
+//#include "scheduler.hpp"
+//***************************************************************************************************************
+
+namespace nfd {
+
+NFD_LOG_INIT("Forwarder");
+
+static Name
+getDefaultStrategyName()
+{
+  return fw::BestRouteStrategy2::getStrategyName();
+}
+
+Forwarder::Forwarder()
+  : m_unsolicitedDataPolicy(new fw::DefaultUnsolicitedDataPolicy())
+  , m_fib(m_nameTree)
+  , m_pit(m_nameTree)
+  , m_measurements(m_nameTree)
+  , m_strategyChoice(*this)
+  , m_csFace(face::makeNullFace(FaceUri("contentstore://")))
+  , Energy_initial (5) //joules
+  , Wait_Time_max (20/*0.128*/) // milliseconds
+  , Alpha (0.5)
+  , pathValidityTime (110000) // milliseconds
+  , Betw (0)
+  , Max_Betw (10)
+  , Max_HC (10)
+  , Max_Cache (50)
+  , CachOcc (0)
+  , Energy (0)
+  , MaxPackets (4500)
+  , Total_packets (0)
+{
+  getFaceTable().addReserved(m_csFace, face::FACEID_CONTENT_STORE);
+
+  m_faceTable.afterAdd.connect([this] (Face& face) {
+    face.afterReceiveInterest.connect(
+      [this, &face] (const Interest& interest) {
+        this->startProcessInterest(face, interest);
+      });
+    face.afterReceiveData.connect(
+      [this, &face] (const Data& data) {
+        this->startProcessData(face, data);
+      });
+    face.afterReceiveNack.connect(
+      [this, &face] (const lp::Nack& nack) {
+        this->startProcessNack(face, nack);
+      });
+    face.onDroppedInterest.connect(
+      [this, &face] (const Interest& interest) {
+        this->onDroppedInterest(face, interest);
+      });
+  });
+
+  m_faceTable.beforeRemove.connect([this] (Face& face) {
+    cleanupOnFaceRemoval(m_nameTree, m_fib, m_pit, face);
+  });
+
+  m_strategyChoice.setDefaultStrategy(getDefaultStrategyName());
+}
+
+Forwarder::~Forwarder() = default;
+void
+Forwarder::onIncomingInterest(Face& inFace, const Interest& interest)
+{
+//***********************Energy
+ if ( (inFace.getId() == 256) )	 //Interest came from External face
+ {
+  ++Total_packets ;
+  NFD_LOG_DEBUG("Total_packets =" << Total_packets); 																								
+  Energy = Energy_initial - ((Total_packets / MaxPackets) * Energy_initial);
+  NFD_LOG_DEBUG("Energy =" << Energy); 																								
+ }
+//***********************		
+ auto  node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+ auto nodIDtag = interest.getTag<ns3::ndn::lp::NodeIDTag>();
+//if (/*interest.getName().getPrefix(1) == "/localhost" || */
+//		node->GetId() == 0 || node->GetId() == 1 || 
+//	node->GetId() == 7 || node->GetId() == 8 ||
+//		node->GetId() == 14 || node->GetId() == 15 ||
+//		node->GetId() == 21 || node->GetId() == 22 ||
+//		node->GetId() == 28 || nodIDtag == nullptr)
+//{		
+  //****************************************Added by DJAMA Adel**********************************************
+  //std::cout<<" ************ Interest Nonce ****************"<< interest.getNonce()<<std::endl;
+  //std::cout<<" ************ Link Type Face ****************"<< inFace.getLinkType() <<std::endl;
+  //auto node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+  //std::cout<<" ************ Node ID :****************"<< node->GetId() <<std::endl;
+  //shared_ptr<lp::HopCountTag> hopCountTag = netPkt.getTag<lp::HopCountTag>();
+  /*auto hopCountTag = interest.getTag<ns3::ndn::lp::HopCountTag>();
+  int hopCount = *hopCountTag;
+  std::cout<<" *******************Hop count: *************************"<<hopCount<<std::endl;*/
+//if(    (node->GetId() != 10 && node->GetId() != 40 && node->GetId() != 70) || (inFace.getId() != 256)  )
+//{
+ int nodID=-1;
+  if (nodIDtag != nullptr){
+	 nodID=*nodIDtag;   
+  }
+  //std::cout<<" ******************Node ID :************************************ "<<node->GetId()<<std::endl;
+  //std::cout<<ns3::Simulator::Now().GetSeconds()<<": ******* Incoming Interest ****** At node: "<<node->GetId()<<"  From node: "<<nodID<<std::endl;
+  //***************************************************************************************************************
+  // receive Interest
+   NFD_LOG_DEBUG("onIncomingInterest face=" << inFace.getId() <<
+           " interest=" << interest.getName() << " Indicated Destinator: "<<nodID);  
+  interest.setTag(make_shared<lp::IncomingFaceIdTag>(inFace.getId()));
+  ++m_counters.nInInterests;
+  // localhost scope control
+  bool isViolatingLocalhost = inFace.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL &&
+                              scope_prefix::LOCALHOST.isPrefixOf(interest.getName());
+  if (isViolatingLocalhost) {
+   NFD_LOG_DEBUG("onIncomingInterest face=" << inFace.getId() <<
+                 " interest=" << interest.getName() << " violates /localhost");
+    // (drop)
+    return;
+  }
+
+  // detect duplicate Nonce with Dead Nonce List
+  bool hasDuplicateNonceInDnl = m_deadNonceList.has(interest.getName(), interest.getNonce());
+  if (hasDuplicateNonceInDnl) {
+    // goto Interest loop pipeline
+	this->onInterestLoop(inFace, interest);
+    return;
+  }
+
+  // strip forwarding hint if Interest has reached producer region
+  if (!interest.getForwardingHint().empty() &&
+      m_networkRegionTable.isInProducerRegion(interest.getForwardingHint())) {
+    NFD_LOG_DEBUG("onIncomingInterest face=" << inFace.getId() <<
+                  " interest=" << interest.getName() << " reaching-producer-region");
+    const_cast<Interest&>(interest).setForwardingHint({});
+  }
+
+  // PIT insert
+   shared_ptr<pit::Entry> pitEntry;
+   pitEntry = m_pit.insert(interest).first;
+   
+  // detect duplicate Nonce in PIT entry
+  int dnw = fw::findDuplicateNonce(*pitEntry, interest.getNonce(), inFace);
+  bool hasDuplicateNonceInPit = dnw != fw::DUPLICATE_NONCE_NONE;
+  if (inFace.getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
+    //for p2p face: duplicate Nonce from same incoming face is not loop
+    hasDuplicateNonceInPit = hasDuplicateNonceInPit && !(dnw & fw::DUPLICATE_NONCE_IN_SAME);
+  }
+  if (hasDuplicateNonceInPit) {
+    // goto Interest loop pipeline
+    this->onInterestLoop(inFace, interest);
+    return;
+  }
+
+  // is pending?
+  if (!pitEntry->hasInRecords()) {
+    if (m_csFromNdnSim == nullptr) {
+      m_cs.find(interest,
+                bind(&Forwarder::onContentStoreHit, this, ref(inFace), pitEntry, _1, _2),
+                bind(&Forwarder::onContentStoreMiss, this, ref(inFace), pitEntry, _1));
+    }
+    else {
+      shared_ptr<Data> match = m_csFromNdnSim->Lookup(interest.shared_from_this());
+      if (match != nullptr) {
+        this->onContentStoreHit(inFace, pitEntry, interest, *match);
+      }
+      else {
+				this->onContentStoreMiss(inFace, pitEntry, interest);
+      }
+    }
+  }
+  else {
+	    this->onContentStoreMiss(inFace, pitEntry, interest);
+   }   
+   
+//}
+}
+
+void
+Forwarder::onInterestLoop(Face& inFace, const Interest& interest)
+{
+  // if multi-access or ad hoc face, drop
+ if (inFace.getLinkType() != ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
+    NFD_LOG_DEBUG("onInterestLoop face=" << inFace.getId() <<
+                  " interest=" << interest.getName() /*<<
+                  " drop"*/);
+    //*******************************************************************************
+	shared_ptr<pit::Entry> pitEntry = m_pit.find(interest);
+	//NFD_LOG_DEBUG("diffTimerFired="<< pitEntry->diffTimerFired);
+ 
+ name_tree::Entry* nte;
+ if (pitEntry != nullptr) nte = m_nameTree.getEntry(*pitEntry); 
+
+ if(nte != nullptr && pitEntry != nullptr)
+ {    
+	if (!pitEntry->diffTimerFired)// Interest is Received (overheared) within the DifferTimer period
+	{
+		NFD_LOG_DEBUG("Cancel Sending Interest="<< interest.getName());
+		scheduler::cancel(pitEntry->differTimer);//Cancel DiffTimer
+		pitEntry->isSatisfied = false;
+		//pitEntry->diffTimerFired = false;
+		//m_pit.erase(pitEntry.get());//Erase pitEntry
+		//this->setExpiryTimer(pitEntry, 0_ms);
+	}
+ }
+	//*******************************************************************************
+	return;
+  }
+
+  NFD_LOG_DEBUG("onInterestLoop face=" << inFace.getId() <<
+                " interest=" << interest.getName() <<
+                " send-Nack-duplicate");
+
+  // send Nack with reason=DUPLICATE
+  // note: Don't enter outgoing Nack pipeline because it needs an in-record.
+  lp::Nack nack(interest);
+  nack.setReason(lp::NackReason::DUPLICATE);
+  inFace.sendNack(nack);
+}
+
+static inline bool
+compare_InRecord_expiry(const pit::InRecord& a, const pit::InRecord& b)
+{
+  return a.getExpiry() < b.getExpiry();
+}
+
+void
+Forwarder::onContentStoreMiss(const Face& inFace, const shared_ptr<pit::Entry>& pitEntry,
+                              const Interest& interest)
+ {
+  NFD_LOG_DEBUG("onContentStoreMiss interest=" << interest.getName());
+  auto  node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+  //auto nodIDtag = interest.getTag<ns3::ndn::lp::NodeIDTag>();
+  ++m_counters.nCsMisses;
+// insert in-record
+  pitEntry->insertOrUpdateInRecord(const_cast<Face&>(inFace), interest);
+//****************************************************************************************
+
+//****************************************************************************************
+  // set PIT expiry timer to the time that the last PIT in-record expires
+  auto lastExpiring = std::max_element(pitEntry->in_begin(), pitEntry->in_end(), &compare_InRecord_expiry);
+  auto lastExpiryFromNow = lastExpiring->getExpiry() - time::steady_clock::now();
+  this->setExpiryTimer(pitEntry, time::duration_cast<time::milliseconds>(lastExpiryFromNow));
+  
+  // has NextHopFaceId?
+  shared_ptr<lp::NextHopFaceIdTag> nextHopTag = interest.getTag<lp::NextHopFaceIdTag>();
+  if (nextHopTag != nullptr) {
+    // chosen NextHop face exists?
+    Face* nextHopFace = m_faceTable.get(*nextHopTag);
+    if (nextHopFace != nullptr) {
+      NFD_LOG_DEBUG("onContentStoreMiss interest=" << interest.getName() << " nexthop-faceid=" << nextHopFace->getId());
+      // go to outgoing Interest pipeline
+      // scope control is unnecessary, because privileged app explicitly wants to forward
+	  this->onOutgoingInterest(pitEntry, *nextHopFace, interest);
+    }
+	return;
+  }
+  // dispatch to strategy: after incoming Interest
+  
+  this->dispatchToStrategy(*pitEntry,
+    [&] (fw::Strategy& strategy) { strategy.afterReceiveInterest(inFace, interest, pitEntry); });
+}
+
+void
+Forwarder::onContentStoreHit(const Face& inFace, const shared_ptr<pit::Entry>& pitEntry,
+                             const Interest& interest, const Data& data)
+{
+  NFD_LOG_DEBUG("onContentStoreHit interest=" << interest.getName());
+  ++m_counters.nCsHits;
+
+  data.setTag(make_shared<lp::IncomingFaceIdTag>(face::FACEID_CONTENT_STORE));
+  // XXX should we lookup PIT for other Interests that also match csMatch?
+
+  pitEntry->isSatisfied = true;
+  pitEntry->dataFreshnessPeriod = data.getFreshnessPeriod();
+
+  // set PIT expiry timer to now
+  this->setExpiryTimer(pitEntry, 0_ms);
+
+  beforeSatisfyInterest(*pitEntry, *m_csFace, data);
+  this->dispatchToStrategy(*pitEntry,
+    [&] (fw::Strategy& strategy) { strategy.beforeSatisfyInterest(pitEntry, *m_csFace, data); });
+
+  // dispatch to strategy: after Content Store hit
+  this->dispatchToStrategy(*pitEntry,
+    [&] (fw::Strategy& strategy) { strategy.afterContentStoreHit(pitEntry, inFace, data); });
+}
+
+
+void 
+Forwarder::DifferTimer(const shared_ptr<pit::Entry>& pitEntry, const shared_ptr<Face>& outFace, 
+									const shared_ptr<Interest>& interest)
+{
+  auto nodeIDtag = interest->getTag<ns3::ndn::lp::NodeIDTag>();
+  int nextHop=-1;
+  if(nodeIDtag != nullptr) nextHop=*nodeIDtag;  
+  NFD_LOG_DEBUG("onOutgoingInterest face=" << outFace->getId() <<
+                " interest=" << pitEntry->getName()<<" To Node: "<<nextHop); 
+  //std::cout<<" ******************DifferTimer----NodeIDTag:************************************ "<<nodeID<<std::endl; 
+  if(outFace->getId() == 258) pitEntry->getInterest().setTag(make_shared<lp::NodeIDTag>(-1));
+  pitEntry->diffTimerFired = true;
+  outFace->sendInterest(*interest);
+  ++m_counters.nOutInterests;
+}
+
+void
+Forwarder::onOutgoingInterest(const shared_ptr<pit::Entry>& pitEntry, Face& outFace, const Interest& interest)
+{
+ //***********************Energy
+ if ( (outFace.getId() == 256)  )	 //Interest goes to External face
+ {
+  ++Total_packets ;
+  NFD_LOG_DEBUG("Total_packets =" << Total_packets); 																								
+  Energy = Energy_initial - ((Total_packets / MaxPackets) * Energy_initial);
+  NFD_LOG_DEBUG("Energy =" << Energy); 																								
+ }
+//***********************	
+  //NFD_LOG_DEBUG("onOutgoingInterest face=" << outFace.getId() <<
+  //              " interest=" << pitEntry->getName());
+
+  // insert out-record
+  shared_ptr<Interest> interest2 = make_shared<Interest>(interest);
+  pitEntry->insertOrUpdateOutRecord(outFace, interest);
+  //*******************************************************************************
+  /*auto nodIDtag = interest2->getTag<ns3::ndn::lp::NodeIDTag>();
+  if (nodIDtag != nullptr){
+  auto aa=pitEntry->getInterest().getTag<ns3::ndn::lp::NodeIDTag>();
+  int a=*aa;
+  //int e=*nodIDtag;
+  std::cout<<" **************  pitEntry ID Tag*******************= " <<a<<std::endl;
+  //std::cout<<" **************  interest2*******************= " <<e<<std::endl;
+  }*/
+  // send Interest
+  //***************************************************************
+  auto node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+  //std::cout<<" ******************Node ID :************************************ "<<node->GetId()<<std::endl;
+  //interest2->setTag(make_shared<lp::NodeIDTag>(node->GetId()));
+  //*****************************************************************
+  shared_ptr<Interest> interest3=interest2;
+  /*{
+  //shared_ptr<Face> F = make_shared<Face>(outFace);  
+     if (outFace.getId() == 1 and ns3::Simulator::Now().GetSeconds()==0){
+	     //ns3::Simulator::Schedule(ns3::Seconds(0.1), [&]{outFace.sendInterest(*interest3);++m_counters.nOutInterests;});	 
+		outFace.sendInterest(*interest3);
+		++m_counters.nOutInterests;
+		 //nfd::scheduler::schedule(time::milliseconds(100), [&]{outFace.sendInterest(*interest3);++m_counters.nOutInterests;});	 
+	 }else{
+		nfd::scheduler::schedule(time::milliseconds(100), [&]{outFace.sendInterest(*interest3);++m_counters.nOutInterests;});	 
+		//outFace.sendInterest(*interest3);
+		//++m_counters.nOutInterests;		
+	 }
+	//nfd::scheduler::schedule(time::milliseconds(100), [&]{outFace.sendInterest(*interest3);++m_counters.nOutInterests;});
+   //&Face::sendInterest,&outFace,(*copy)
+   //ns3::Simulator::Schedule(ns3::Seconds(0.5), &Forwarder::timer, &outFace, interest3);
+   // ************************************************
+   //       pitEntry->expiryTimer = scheduler::schedule(duration, bind(&Forwarder::onInterestFinalize, this, pitEntry));
+   // PIT delete
+   //       scheduler::cancel(pitEntry->expiryTimer); 
+  //       m_pit.erase(pitEntry.get());
+  //}*/
+   // **************************************************
+   auto FaceCopy =outFace.shared_from_this();
+   auto InterestCopy =interest3->shared_from_this();
+   //InterestCopy->setTag(make_shared<lp::NodeIDTag>(node->GetId()));
+ /*  
+   auto nodIDtag = interest2->getTag<ns3::ndn::lp::NodeIDTag>();
+   if (nodIDtag != nullptr)
+   {
+	  auto zz=pitEntry->getInterest().getTag<ns3::ndn::lp::NodeIDTag>();
+	  int ee=*nodIDtag;
+	  if (zz != nullptr) 
+	     {
+			int z=*zz;
+			std::cout<<" **************  pitEntry ID Tag*******************= " <<z<<std::endl;
+		 }
+	  std::cout<<ns3::Simulator::Now().GetSeconds()<<" **************interest2*******************= " <<ee<<std::endl;
+   }
+*/   
+   // Enable Diff timer in case of outgoing face is external (ad hoc face = 256)
+   auto pitIdNodTag=pitEntry->getInterest().getTag<ns3::ndn::lp::NodeIDTag>();
+   int PitIdNTag = -1;
+   if (pitIdNodTag !=nullptr) PitIdNTag = *pitIdNodTag;
+   // Define Diff Time according to the outFace and the Interest packet type 
+   time::microseconds DiffTime ;
+   DiffTime = time::microseconds(0);   
+   //ns3::RngSeedManager::SetSeed (1);  // Changes seed from default of 1 to 3
+   //ns3::RngSeedManager::SetRun (1);   // Changes run number from default of 1 to 7
+   ns3::Ptr<ns3::UniformRandomVariable> randVar = ns3::CreateObject<ns3::UniformRandomVariable> ();
+   randVar->SetAttribute ("Min", ns3::DoubleValue (0));
+   randVar->SetAttribute ("Max", ns3::DoubleValue (10));// 1 milliseconds
+   int myRandomNo = randVar->GetInteger ();
+   //std::cout<<ns3::Simulator::Now().GetSeconds()<<" **************myRandomNo*******************= " <<myRandomNo<<std::endl;
+   
+   //----------------Blind Forwarding Algo with random Delay--------------------------------------
+  /*
+   if (outFace.getId() == 256 && pitIdNodTag != nullptr ) 
+			DiffTime = time::milliseconds(myRandomNo);//********Differ Delay Function
+   else DiffTime = time::milliseconds(0);
+   */ 
+	//----------------Our proposed Algo--------------------------------------
+   bool Send_Bool = true;
+   const Fib& fib = this->getFib();
+   const fib::Entry& fibEntry = fib.findLongestPrefixMatch(*pitEntry);
+   auto FibNodIDTag = fibEntry.interest.getTag<ns3::ndn::lp::NodeIDTag>();	
+   int FibNId = -1;
+   if (FibNodIDTag != nullptr) FibNId=*FibNodIDTag;
+   auto FibHopCountTag = fibEntry.interest.getTag<ns3::ndn::lp::HopCountTag>();
+   int FibHC = -1;
+   if (FibHopCountTag != nullptr) FibHC= *FibHopCountTag;
+   //if ((outFace.getId() == 256) && (FibHopCountTag == nullptr || FibHC == 999)) // Case Face external and preifx is not marked
+    //
+   auto FibPrefixTag = fibEntry.interest.getTag<ns3::ndn::lp::PrefixNameTag>();
+   Name FibPT = "/null";
+   bool SamePrefix = false;
+   if (FibPrefixTag != nullptr) 
+   {
+	   FibPT= *FibPrefixTag;
+	   if( FibPT.getPrefix(1) == interest.getName().getPrefix(1) ) SamePrefix = true;
+   }  
+   auto FibBusyTag = fibEntry.interest.getTag<ns3::ndn::lp::BusyTag>();
+   bool FibBT = false;
+   if(FibBusyTag != nullptr) FibBT =*FibBusyTag;   
+   //	(fibEntry.interest.getName().getPrefix(1) ==
+
+//std::cout<<" ****  FibNId: " <<FibNId<<" ****  FibHC: "<<FibHC<< 
+//" PitIdNTag: "<<PitIdNTag<< " FibBT: "<<FibBT<<std::endl;
+
+   if (         (PitIdNTag != -1) /* Came from External*/
+          &&(      ( (FibNodIDTag == nullptr || FibNId == 999) && FibBT == false)
+		          ||   (PitIdNTag ==999 && FibBT == false)     )//
+          && (outFace.getId() != 258)   ) // Case Interest goes to External Face  and prefix is not marked 
+															  //  Or not Busy for that prefix
+   {
+	   
+	   if( (PitIdNTag ==999) || (PitIdNTag == int(node->GetId()) ) )
+	   {
+		    //int Total_packets = m_counters.nOutInterests + m_counters.nInInterests 
+			//														+ m_counters.nInData + m_counters.nOutData;
+			// Max packet (Interest + Data) 24000 for packet rate 20 p/s during 600 s   4000 for 100 s
+		   //Energy = Energy_initial - ((Total_packets / 5000) * Energy_initial);
+		   float waitTime;
+		   if( (FibHopCountTag != nullptr) && (SamePrefix == true) )
+		   {
+			   waitTime = (myRandomNo) + (1 - ( (Alpha * (Energy / Energy_initial)) + ( (1-Alpha) / FibHC)  )       )     *     Wait_Time_max;
+		   }
+		   else
+		   {
+			   	waitTime = (myRandomNo) + (1 -  (Alpha * (Energy / Energy_initial))  )     *     Wait_Time_max;
+		   }
+ //          std::cout<<" ****  waitTime (milliseconds)****= " <<waitTime<<" ****  Energy****= " <<Energy<<" ****  FIB Hop Count****= "<< FibHC <<std::endl;
+		   DiffTime = time::microseconds(int(waitTime)*1000);
+	   }else if ( PitIdNTag != int(node->GetId()) )//Delete PIT Entry
+	   {
+		   //const shared_ptr<pit::Entry>& pitEntry1 = pitEntry;
+		   
+		  // {
+			   NFD_LOG_DEBUG("Cancel Sending Interest="<< InterestCopy->getName()<<" ----- I am Not Destinator ----  ");
+			   m_pit.erase(pitEntry.get());
+			   Send_Bool = false;
+		   //}
+	   }
+   }
+   else if(   ( (FibPrefixTag != nullptr) && (SamePrefix == true)   )
+                   || (outFace.getId() == 258)  || (PitIdNTag == -1) )// Marked Interest (p)
+   {	
+//		std::cout<<" ****  FibNId: " <<FibNId<<" ****  FibHC: "<<FibHC<< " PitIdNTag: "<<PitIdNTag<<std::endl;
+		if(       ( (FibNodIDTag != nullptr && FibNId != 999) && (PitIdNTag == -1) 
+		              && ( FibPT.getPrefix(1) == interest.getName().getPrefix(1) ) ) //Marked Interest (p) from Internal face
+		       || (   (PitIdNTag != -1) && (PitIdNTag == int(node->GetId())) )   )  //Marked from external + I am destination 
+		{
+			InterestCopy->setTag(make_shared<lp::NodeIDTag>(FibNId)); //Take profit from Learning process
+		    //std::cout<<" ****  1- Marked Interest (p) *** " <<std::endl;
+			if( outFace.getId() != 258 && FibBT == false )    //Marked to be sent to external + I am destination
+			{
+			fibEntry.interest.setTag(make_shared<lp::BusyTag>(true));
+			//
+			time::milliseconds PathValdityTime; 
+			PathValdityTime = time::milliseconds(pathValidityTime);
+			const Name& prefix = pitEntry->getName();
+			scheduler::cancel(this->pathTimer);
+			NFD_LOG_DEBUG("------------------PathValdityTime is triggered------------");
+			++Betw;
+			this->pathTimer = scheduler::schedule(PathValdityTime, bind(&Forwarder::PathTimer, this, prefix));  
+	        }
+			//	
+		}
+		else if(PitIdNTag == -1  )  // Internal Face
+			{
+				InterestCopy->setTag(make_shared<lp::NodeIDTag>(999));
+//				std::cout<<" ****  2- Not Marked Interest (p) from Internal face*** " <<std::endl;
+			}
+			else if( PitIdNTag != int(node->GetId()) && outFace.getId() != 258 ) //Marked from External + I am Not destination 
+			{
+				NFD_LOG_DEBUG("Cancel Sending Interest="<< InterestCopy->getName()<<" ----- I am Not Destinator ----  ");
+			    //fibEntry.interest.setTag(make_shared<lp::NodeIDTag>(999));
+				//fibEntry.interest.setTag(make_shared<ns3::ndn::lp::HopCountTag>(999));
+				//fibEntry.interest.setTag(make_shared<lp::PrefixNameTag>(data.getName("/null")));
+				m_pit.erase(pitEntry.get());
+				Send_Bool = false;
+			}
+		DiffTime = time::microseconds(0);
+	}  else if( FibBT == true ) 
+	// Interest came from external, to be sent to External face, However another Prefix Name is marked and i am Busy.
+	{
+		NFD_LOG_DEBUG("Cancel Sending Interest="<< InterestCopy->getName()<<" ----- I am busy ----  ");
+		m_pit.erase(pitEntry.get());
+		Send_Bool = false;
+	}
+ //*******************************************************************
+//******************************************************************** 
+	if (Send_Bool)
+	{
+		//DiffTime = time::microseconds(0);
+		pitEntry->diffTimerFired = false;
+		pitEntry->differTimer = scheduler::schedule(DiffTime, bind(&Forwarder::DifferTimer, this,  pitEntry, FaceCopy, InterestCopy));
+	}
+}
+
+void
+Forwarder::onInterestFinalize(const shared_ptr<pit::Entry>& pitEntry)
+{
+ name_tree::Entry* nte = m_nameTree.getEntry(*pitEntry); 
+ if(nte != nullptr)
+ {
+   NFD_LOG_DEBUG("onInterestFinalize interest=" << pitEntry->getName() <<
+                (pitEntry->isSatisfied ? " satisfied" : " unsatisfied"));
+
+  if (!pitEntry->isSatisfied) {
+    beforeExpirePendingInterest(*pitEntry);
+  }
+
+  // Dead Nonce List insert if necessary
+  this->insertDeadNonceList(*pitEntry, 0);
+
+  // PIT delete
+  scheduler::cancel(pitEntry->expiryTimer);
+  m_pit.erase(pitEntry.get());
+}
+}
+//*****************************************
+void
+Forwarder::PathTimer(const Name& prefix)
+{
+  NFD_LOG_DEBUG("************Expery Path Timer*******Reset the Path*********");
+  const Fib& fib = this->getFib();
+  const fib::Entry& fibEntry = fib.findLongestPrefixMatch(prefix);
+ //auto nodeIDtag = interest.getTag<ns3::ndn::lp::NodeIDTag>();
+ //int nodeID=-1;   
+ //if (nodeIDtag != nullptr) nodeID=*nodeIDtag;
+//std::cout<<" ******************PathTimer----Old NodeIDTag:************************************ "<<nodeID<<std::endl; 
+
+
+fibEntry.interest.setTag(make_shared<ns3::ndn::lp::NodeIDTag>(999));//*******Reset the path (Set Next Hop in fibEntry = 999) 
+fibEntry.interest.setTag(make_shared<lp::BusyTag>(false));
+
+ //nodeIDtag = interest.getTag<ns3::ndn::lp::NodeIDTag>();
+ //nodeID=*nodeIDtag;
+ //std::cout<<" ******************PathTimer----New NodeIDTag:************************************ "<<nodeID<<std::endl; 
+ //auto nodeIDtag = interest->getTag<ns3::ndn::lp::NodeIDTag>();
+ //int nodeID=*nodeIDtag;   
+ //std::cout<<" ******************DifferTimer----NodeIDTag:************************************ "<<nodeID<<std::endl; 
+}
+//*****************************************
+void
+Forwarder::onIncomingData(Face& inFace, const Data& data)
+{
+ //***********************Energy
+ if ( (inFace.getId() == 256) )	 //Data came from External face
+ {
+  ++Total_packets ;
+  NFD_LOG_DEBUG("Total_packets =" << Total_packets); 																								
+  Energy = Energy_initial - ((Total_packets / MaxPackets) * Energy_initial);
+  NFD_LOG_DEBUG("Energy =" << Energy); 																								
+ }
+//***********************	
+/*{ 
+ //std::cout<<" ************ Link Type Face ****************"<< inFace.getLinkType() <<std::endl;
+  // receive Data
+  //std::cout<<"onIncomingData face=" << inFace.getId() << " data=" << data.getName()<<std::endl;
+  //***************************************************************************************************************
+// auto nodIDtag4 = data.getTag<ns3::ndn::lp::NodeIDTag>();
+//  int nodID4=-1;
+//  if (nodIDtag4 != nullptr){
+//	 nodID4=*nodIDtag4;   
+ // }
+ // if(nodID4 != -1)
+ //{
+ //   auto node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+	//std::cout<<" ******************Node ID :************************************ "<<node->GetId()<<std::endl;
+    //std::cout<<ns3::Simulator::Now().GetSeconds()<<": ******* Incoming Data ****** At node: "<<node->GetId()<<"  From node: "<<nodID4<<std::endl;
+    //std::cout<<ns3::Simulator::Now().GetSeconds()<<" **********Incoming Data From node: *********"<<nodID4<<std::endl; 
+ //}
+//}*/
+  //***************************************************************************************************************
+  auto hopCountTag = data.getTag<ns3::ndn::lp::HopCountTag>();
+  auto nodIDtag = data.getTag<ns3::ndn::lp::NodeIDTag>();
+  double hopC=-1;
+  int nID=-1;
+  if (hopCountTag != nullptr) hopC=*hopCountTag;  
+  if (nodIDtag != nullptr) nID=*nodIDtag;  	 
+  NFD_LOG_DEBUG("onIncomingData face=" << inFace.getId() << " data=" << data.getName()
+									<<" From Node:"<< nID<<" HopCount="<<hopC);
+  data.setTag(make_shared<lp::IncomingFaceIdTag>(inFace.getId()));
+  ++m_counters.nInData;
+  // localhost scope control
+  bool isViolatingLocalhost = inFace.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL &&
+                              scope_prefix::LOCALHOST.isPrefixOf(data.getName());
+  if (isViolatingLocalhost) {
+    NFD_LOG_DEBUG("onIncomingData face=" << inFace.getId() <<
+                  " data=" << data.getName() << " violates /localhost");
+  // (drop)
+    return;
+  }
+
+  // PIT match
+  pit::DataMatchResult pitMatches = m_pit.findAllDataMatches(data);
+  if (pitMatches.size() == 0) {
+    // goto Data unsolicited pipeline
+    this->onDataUnsolicited(inFace, data);
+    return;
+  }
+
+  shared_ptr<Data> dataCopyWithoutTag = make_shared<Data>(data);
+  dataCopyWithoutTag->removeTag<lp::HopCountTag>();
+  //***********************************
+  dataCopyWithoutTag->removeTag<lp::NodeIDTag>();
+  //***********************************
+  // CS insert
+  //Compute HDC prob function
+  double ProbCache;
+  NFD_LOG_DEBUG("Energy=" << Energy <<" hopC=" << hopC<<" CachOcc=" << CachOcc<<" Betw=" << Betw);   
+  if (hopC != -1)          ProbCache = 0.25 * (Energy / Energy_initial) + 0.25  * (hopC / Max_HC ) + 0.25 * ( 1 - (CachOcc/Max_Cache) ) + 0.25 * (Betw / Max_Betw); 
+  else                         ProbCache = 0.33 * (Energy / Energy_initial) + 0.33* ( 1 - (CachOcc/Max_Cache) ) + 0.33 * (Betw / Max_Betw);
+  ns3::Ptr<ns3::UniformRandomVariable> randVar = ns3::CreateObject<ns3::UniformRandomVariable> ();
+  randVar->SetAttribute ("Min", ns3::DoubleValue (0));
+  randVar->SetAttribute ("Max", ns3::DoubleValue (100));// 1 milliseconds
+  double myRandomNo = randVar->GetInteger () ;
+  auto Rand = myRandomNo / 100 ;
+  NFD_LOG_DEBUG("ProbCache=" << ProbCache <<" Rand=" << Rand); 
+  if ( (ProbCache >= Rand) && ( (inFace.getId() == 256) || (inFace.getId() == 258)  )  ) //Data came from Internal or External face
+
+  {	  
+    if (CachOcc < Max_Cache) ++CachOcc;
+    //
+	if (m_csFromNdnSim == nullptr)
+      m_cs.insert(*dataCopyWithoutTag);
+    else
+      m_csFromNdnSim->Add(dataCopyWithoutTag);
+  }
+  // when only one PIT entry is matched, trigger strategy: after receive Data
+  if (pitMatches.size() == 1) {
+	
+    auto& pitEntry = pitMatches.front();
+	
+if(pitEntry->diffTimerFired == false && inFace.getId()!=258)
+{
+	this->onDataUnsolicited(inFace, data);
+	 return;
+}
+else{
+	//auto node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+	//***********************************************************
+/*	int a=-1;
+	auto aa=pitEntry->getInterest().getTag<ns3::ndn::lp::NodeIDTag>();
+    if (aa != nullptr) 	a=*aa;*/
+	//***********************************************************
+   //auto nodIDtag = data.getTag<ns3::ndn::lp::NodeIDTag>();
+	//}
+   if (nodIDtag != nullptr)   // Incoming Data from external face, put NodeIDTag in FIB entry (Learning process) 
+   {
+		   //if  (node->GetId() == 0)
+			//{
+			   //NFD_LOG_DEBUG("onIncomingData matching=" << pitEntry->getName()<<" HopCount="<<hopC);//<< "    pitEntry ID Tag=" <<a);
+			//}
+	//}  
+    //*************************************************************
+   const Fib& fib = this->getFib();
+   const fib::Entry& fibEntry = fib.findLongestPrefixMatch(*pitEntry);
+   auto FibNodIDtag = fibEntry.interest.getTag<ns3::ndn::lp::NodeIDTag>();
+   int FibIDTag = -1;
+   if(FibNodIDtag != nullptr) FibIDTag =*FibNodIDtag;   
+   auto HopCountTag = fibEntry.interest.getTag<ns3::ndn::lp::HopCountTag>();
+   int FibHC = -1;
+   if(HopCountTag != nullptr) FibHC =*HopCountTag;
+
+   
+   auto FibBusyTag = fibEntry.interest.getTag<ns3::ndn::lp::BusyTag>();
+   bool FibBT = false;
+   if(FibBusyTag != nullptr) {FibBT =*FibBusyTag;}
+   
+   //time::milliseconds PathValdityTime;   
+   
+   if (FibNodIDtag == nullptr || FibIDTag == 999 || FibBT == false){ //if new FIB entry or Not marked Interest or not busy
+      
+	// NFD_LOG_DEBUG("---------FibIDTag---------"<<FibIDTag<<"---------FibHopCount---------"
+	//                               <<FibHC<<"---------FibBusyTag---------"<<FibBT);
+	  
+	  fibEntry.interest.setTag(make_shared<lp::NodeIDTag>(nID));
+	  fibEntry.interest.setTag(make_shared<ns3::ndn::lp::HopCountTag>(hopC));
+	  fibEntry.interest.setTag(make_shared<lp::PrefixNameTag>(data.getName()));
+	  fibEntry.interest.setTag(make_shared<lp::BusyTag>(false));
+     /*
+	  PathValdityTime = time::milliseconds(pathValidityTime);
+	  const Name& prefix = pitEntry->getName();
+	  scheduler::cancel(this->pathTimer);
+	  NFD_LOG_DEBUG("------------------PathValdityTime is triggered------------");
+	  this->pathTimer = scheduler::schedule(PathValdityTime, bind(&Forwarder::PathTimer, this, prefix));  
+      */
+   }/*else if(FibHC != -1  )
+	{
+
+	   auto FibPrefixTag = fibEntry.interest.getTag<ns3::ndn::lp::PrefixNameTag>();
+	   Name FibPT = "/null";
+	   bool SamePrefix = false;
+	   if (FibPrefixTag != nullptr) 
+	   {
+		   FibPT= *FibPrefixTag;
+		   if( FibPT.getPrefix(1) == data.getName().getPrefix(1) ) SamePrefix = true;
+	   }    
+	  if(SamePrefix && (hopC <   FibHC) ) 
+	  {
+			fibEntry.interest.setTag(make_shared<ns3::ndn::lp::HopCountTag>(hopC));
+			fibEntry.interest.setTag(make_shared<lp::NodeIDTag>(nID));
+	  }
+	//std::cout<<" ******************Node ID :************************************ "<<nodID<<std::endl;
+    //data.setTag(make_shared<lp::NodeIDTag>(node->GetId()));
+	}*/
+}
+	//**************************************************************
+	// set PIT expiry timer to now
+    this->setExpiryTimer(pitEntry, 0_ms);
+
+    beforeSatisfyInterest(*pitEntry, inFace, data);
+    // trigger strategy: after receive Data
+   
+   this->dispatchToStrategy(*pitEntry,
+      [&] (fw::Strategy& strategy) { strategy.afterReceiveData(pitEntry, inFace, data); });
+
+    // mark PIT satisfied
+    pitEntry->isSatisfied = true;
+    pitEntry->dataFreshnessPeriod = data.getFreshnessPeriod();
+
+    // Dead Nonce List insert if necessary (for out-record of inFace)
+    this->insertDeadNonceList(*pitEntry, &inFace);
+
+    // delete PIT entry's out-record
+    pitEntry->deleteOutRecord(inFace);
+  }
+}
+  // when more than one PIT entry is matched, trigger strategy: before satisfy Interest,
+  // and send Data to all matched out faces
+  else {
+    std::set<Face*> pendingDownstreams;
+    auto now = time::steady_clock::now();
+    for (const shared_ptr<pit::Entry>& pitEntry : pitMatches) {
+      NFD_LOG_DEBUG("onIncomingData matching=" << pitEntry->getName());
+
+      // remember pending downstreams
+      for (const pit::InRecord& inRecord : pitEntry->getInRecords()) {
+        if (inRecord.getExpiry() > now) {
+          pendingDownstreams.insert(&inRecord.getFace());
+        }
+      }
+
+      // set PIT expiry timer to now
+      this->setExpiryTimer(pitEntry, 0_ms);
+
+      // invoke PIT satisfy callback
+      beforeSatisfyInterest(*pitEntry, inFace, data);
+      this->dispatchToStrategy(*pitEntry,
+        [&] (fw::Strategy& strategy) { strategy.beforeSatisfyInterest(pitEntry, inFace, data); });
+
+      // mark PIT satisfied
+      pitEntry->isSatisfied = true;
+      pitEntry->dataFreshnessPeriod = data.getFreshnessPeriod();
+
+      // Dead Nonce List insert if necessary (for out-record of inFace)
+      this->insertDeadNonceList(*pitEntry, &inFace);
+
+      // clear PIT entry's in and out records
+      pitEntry->clearInRecords();
+      pitEntry->deleteOutRecord(inFace);
+    }
+
+    // foreach pending downstream
+    for (Face* pendingDownstream : pendingDownstreams) {
+      if (pendingDownstream->getId() == inFace.getId() &&
+          pendingDownstream->getLinkType() != ndn::nfd::LINK_TYPE_AD_HOC) {
+
+          continue;
+      }
+      // goto outgoing Data pipeline
+      this->onOutgoingData(data, *pendingDownstream);
+    }
+  }
+}
+
+void
+Forwarder::onDataUnsolicited(Face& inFace, const Data& data)
+{
+  // accept to cache?
+  fw::UnsolicitedDataDecision decision = m_unsolicitedDataPolicy->decide(inFace, data);
+ //********************************************************** 
+  /*auto hopCountTag = data.getTag<ns3::ndn::lp::HopCountTag>();
+  int hopC=-1;
+  if (hopCountTag != nullptr) hopC=*hopCountTag;
+  double ProbCache;
+  NFD_LOG_DEBUG("Energy=" << Energy <<" hopC=" << hopC<<" CachOcc=" << CachOcc<<" Betw=" << Betw); 
+  if (hopC != -1)          ProbCache = 0.33 * (Energy / Energy_initial) + 0.33  * (hopC / Max_HC ) + 0.33 * ( 1 - (CachOcc/Max_Cache) ) ; 
+  else                         ProbCache = 0.5 * (Energy / Energy_initial) + 0.5 * ( 1 - (CachOcc/Max_Cache) ) ;
+  ns3::Ptr<ns3::UniformRandomVariable> randVar = ns3::CreateObject<ns3::UniformRandomVariable> ();
+  randVar->SetAttribute ("Min", ns3::DoubleValue (0));
+  randVar->SetAttribute ("Max", ns3::DoubleValue (100));// 1 milliseconds
+  double myRandomNo = randVar->GetInteger () ;
+  auto Rand = myRandomNo / 100 ;
+  NFD_LOG_DEBUG("ProbCache=" << ProbCache <<" Rand=" << Rand); 
+  if ( (ProbCache >= Rand) && ( (inFace.getId() == 256) || (inFace.getId() == 258)  )  ) //Data came from Internal or External face
+  {	  
+    if ( (CachOcc < Max_Cache) ) ++CachOcc;
+    //
+    if (m_csFromNdnSim == nullptr)
+      m_cs.insert(data, true);
+    else
+      m_csFromNdnSim->Add(data.shared_from_this());
+  }*/
+//*************************************************************  
+  if (decision == fw::UnsolicitedDataDecision::CACHE) {
+    // CS insert
+    if (m_csFromNdnSim == nullptr)
+      m_cs.insert(data, true);
+    else
+      m_csFromNdnSim->Add(data.shared_from_this());
+  }
+
+  NFD_LOG_DEBUG("onDataUnsolicited face=" << inFace.getId() <<
+               " data=" << data.getName() <<
+               " decision=" << decision);
+}
+
+void
+Forwarder::onOutgoingData(const Data& data, Face& outFace)
+{
+ //***********************Energy
+ if ( (outFace.getId() == 256)  )	 //Data goes External face
+ {
+  ++Total_packets ;
+  NFD_LOG_DEBUG("Total_packets =" << Total_packets); 																								
+  Energy = Energy_initial - ((Total_packets / MaxPackets) * Energy_initial);
+  NFD_LOG_DEBUG("Energy =" << Energy); 																								
+ }
+//***********************	
+	
+  shared_ptr<Data> data2 = make_shared<Data>(data);
+  if (outFace.getId() == face::INVALID_FACEID) {
+    NFD_LOG_WARN("onOutgoingData face=invalid data=" << data.getName());
+    return;
+  }
+  //std::cout<<"onOutgoingData face=" << outFace.getId() << " data=" << data.getName()<<std::endl;
+  NFD_LOG_DEBUG("onOutgoingData face=" << outFace.getId() << " data=" << data.getName());
+
+  // localhost scope control
+  bool isViolatingLocalhost = outFace.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL &&
+                              scope_prefix::LOCALHOST.isPrefixOf(data.getName());
+  if (isViolatingLocalhost) {
+    NFD_LOG_DEBUG("onOutgoingData face=" << outFace.getId() <<
+                  " data=" << data.getName() << " violates /localhost");
+    // (drop)
+    return;
+  }
+  // TODO traffic manager
+  //***************************************************************
+  auto node = ns3::NodeList::GetNode(ns3::Simulator::GetContext());
+  data2->setTag(make_shared<lp::NodeIDTag>(node->GetId()));
+  /*{
+  //shared_ptr<Data> data3=data2;
+  //auto DataCopy =data3->shared_from_this();
+  auto nodeIDtag = data2->getTag<ns3::ndn::lp::NodeIDTag>();
+  if(nodeIDtag != NULL)
+  {
+	int nodeID=*nodeIDtag;  
+	std::cout<<" ******************NodeIDTag:********OnOutGoingData****************************: "<<nodeID<<std::endl; 
+  }
+}*/
+  // send Data
+   //***********************************
+   pit::DataMatchResult pitMatches = m_pit.findAllDataMatches(data);
+   auto& pitEntry = pitMatches.front();
+   const Fib& fib = this->getFib();
+   const fib::Entry& fibEntry = fib.findLongestPrefixMatch(*pitEntry);
+   
+   auto pitIdNodTag=pitEntry->getInterest().getTag<ns3::ndn::lp::NodeIDTag>();
+   int PitIdNTag = -1;
+   if (pitIdNodTag !=nullptr) 
+   {
+	   PitIdNTag = *pitIdNodTag;
+//	   std::cout<<"***************PitIdNTag**************"<<PitIdNTag<<std::endl;
+   }
+   
+
+   auto FibPrefixTag = fibEntry.interest.getTag<ns3::ndn::lp::PrefixNameTag>();
+   Name FibPT = "/null";
+   if (FibPrefixTag != nullptr) FibPT= *FibPrefixTag;   
+  
+   auto FibBusyTag = fibEntry.interest.getTag<ns3::ndn::lp::BusyTag>();
+   bool FibBT = false;
+   if(FibBusyTag != nullptr) FibBT =*FibBusyTag;
+   //***************************************
+  if(  ( (FibBT == false) || (FibPT.getPrefix(1) == pitEntry->getName().getPrefix(1)) )  || outFace.getId() ==258 || PitIdNTag == -1)
+  {
+    if( (outFace.getId() ==258)   &&  (FibBT == false)   )
+	{ 
+	  fibEntry.interest.setTag(make_shared<lp::BusyTag>(true));
+	  time::milliseconds PathValdityTime; 
+	  PathValdityTime = time::milliseconds(pathValidityTime);
+	  const Name& prefix = pitEntry->getName();
+	  scheduler::cancel(this->pathTimer);
+	  NFD_LOG_DEBUG("------------------PathValdityTime is triggered------------");
+	  ++Betw;
+	  this->pathTimer = scheduler::schedule(PathValdityTime, bind(&Forwarder::PathTimer, this, prefix));  
+	}
+	outFace.sendData(*data2);
+    ++m_counters.nOutData;
+  }
+}
+
+void
+Forwarder::onIncomingNack(Face& inFace, const lp::Nack& nack)
+{
+  // receive Nack
+  nack.setTag(make_shared<lp::IncomingFaceIdTag>(inFace.getId()));
+  ++m_counters.nInNacks;
+
+  // if multi-access or ad hoc face, drop
+  if (inFace.getLinkType() != ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
+    NFD_LOG_DEBUG("onIncomingNack face=" << inFace.getId() <<
+                  " nack=" << nack.getInterest().getName() <<
+                  "~" << nack.getReason() << " face-is-multi-access");
+    return;
+  }
+
+  // PIT match
+  shared_ptr<pit::Entry> pitEntry = m_pit.find(nack.getInterest());
+  // if no PIT entry found, drop
+  if (pitEntry == nullptr) {
+    NFD_LOG_DEBUG("onIncomingNack face=" << inFace.getId() <<
+                  " nack=" << nack.getInterest().getName() <<
+                  "~" << nack.getReason() << " no-PIT-entry");
+    return;
+  }
+
+  // has out-record?
+  pit::OutRecordCollection::iterator outRecord = pitEntry->getOutRecord(inFace);
+  // if no out-record found, drop
+  if (outRecord == pitEntry->out_end()) {
+    NFD_LOG_DEBUG("onIncomingNack face=" << inFace.getId() <<
+                  " nack=" << nack.getInterest().getName() <<
+                  "~" << nack.getReason() << " no-out-record");
+    return;
+  }
+
+  // if out-record has different Nonce, drop
+  if (nack.getInterest().getNonce() != outRecord->getLastNonce()) {
+    NFD_LOG_DEBUG("onIncomingNack face=" << inFace.getId() <<
+                  " nack=" << nack.getInterest().getName() <<
+                  "~" << nack.getReason() << " wrong-Nonce " <<
+                  nack.getInterest().getNonce() << "!=" << outRecord->getLastNonce());
+    return;
+  }
+
+  NFD_LOG_DEBUG("onIncomingNack face=" << inFace.getId() <<
+                " nack=" << nack.getInterest().getName() <<
+                "~" << nack.getReason() << " OK");
+
+  // record Nack on out-record
+  outRecord->setIncomingNack(nack);
+
+  // set PIT expiry timer to now when all out-record receive Nack
+  if (!fw::hasPendingOutRecords(*pitEntry)) {
+    this->setExpiryTimer(pitEntry, 0_ms);
+  }
+
+  // trigger strategy: after receive NACK
+  this->dispatchToStrategy(*pitEntry,
+    [&] (fw::Strategy& strategy) { strategy.afterReceiveNack(inFace, nack, pitEntry); });
+}
+
+void
+Forwarder::onOutgoingNack(const shared_ptr<pit::Entry>& pitEntry, const Face& outFace,
+                          const lp::NackHeader& nack)
+{
+  if (outFace.getId() == face::INVALID_FACEID) {
+    NFD_LOG_WARN("onOutgoingNack face=invalid" <<
+                  " nack=" << pitEntry->getInterest().getName() <<
+                  "~" << nack.getReason() << " no-in-record");
+    return;
+  }
+
+  // has in-record?
+  pit::InRecordCollection::iterator inRecord = pitEntry->getInRecord(outFace);
+
+  // if no in-record found, drop
+  if (inRecord == pitEntry->in_end()) {
+    NFD_LOG_DEBUG("onOutgoingNack face=" << outFace.getId() <<
+                  " nack=" << pitEntry->getInterest().getName() <<
+                  "~" << nack.getReason() << " no-in-record");
+    return;
+  }
+
+  // if multi-access or ad hoc face, drop
+  if (outFace.getLinkType() != ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
+    NFD_LOG_DEBUG("onOutgoingNack face=" << outFace.getId() <<
+                  " nack=" << pitEntry->getInterest().getName() <<
+                  "~" << nack.getReason() << " face-is-multi-access");
+    return;
+  }
+
+  NFD_LOG_DEBUG("onOutgoingNack face=" << outFace.getId() <<
+                " nack=" << pitEntry->getInterest().getName() <<
+                "~" << nack.getReason() << " OK");
+
+  // create Nack packet with the Interest from in-record
+  lp::Nack nackPkt(inRecord->getInterest());
+  nackPkt.setHeader(nack);
+
+  // erase in-record
+  pitEntry->deleteInRecord(outFace);
+
+  // send Nack on face
+ const_cast<Face&>(outFace).sendNack(nackPkt);
+  ++m_counters.nOutNacks;
+}
+
+void
+Forwarder::onDroppedInterest(Face& outFace, const Interest& interest)
+{
+  m_strategyChoice.findEffectiveStrategy(interest.getName()).onDroppedInterest(outFace, interest);
+}
+
+void
+Forwarder::setExpiryTimer(const shared_ptr<pit::Entry>& pitEntry, time::milliseconds duration)
+{
+  BOOST_ASSERT(duration >= 0_ms);
+
+  scheduler::cancel(pitEntry->expiryTimer);
+
+  pitEntry->expiryTimer = scheduler::schedule(duration,
+    bind(&Forwarder::onInterestFinalize, this, pitEntry));
+}
+
+static inline void
+insertNonceToDnl(DeadNonceList& dnl, const pit::Entry& pitEntry,
+                 const pit::OutRecord& outRecord)
+{
+  dnl.add(pitEntry.getName(), outRecord.getLastNonce());
+}
+
+void
+Forwarder::insertDeadNonceList(pit::Entry& pitEntry, Face* upstream)
+{
+  // need Dead Nonce List insert?
+  bool needDnl = true;
+  if (pitEntry.isSatisfied) {
+    BOOST_ASSERT(pitEntry.dataFreshnessPeriod >= 0_ms);
+    needDnl = static_cast<bool>(pitEntry.getInterest().getMustBeFresh()) &&
+              pitEntry.dataFreshnessPeriod < m_deadNonceList.getLifetime();
+  }
+
+  if (!needDnl) {
+    return;
+  }
+
+  // Dead Nonce List insert
+  if (upstream == nullptr) {
+    // insert all outgoing Nonces
+    const pit::OutRecordCollection& outRecords = pitEntry.getOutRecords();
+    std::for_each(outRecords.begin(), outRecords.end(),
+                  bind(&insertNonceToDnl, ref(m_deadNonceList), cref(pitEntry), _1));
+  }
+  else {
+    // insert outgoing Nonce of a specific face
+    pit::OutRecordCollection::iterator outRecord = pitEntry.getOutRecord(*upstream);
+    if (outRecord != pitEntry.getOutRecords().end()) {
+      m_deadNonceList.add(pitEntry.getName(), outRecord->getLastNonce());
+    }
+  }
+}
+
+} // namespace nfd
